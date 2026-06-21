@@ -1,0 +1,395 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        
+      - name: Create project structure
+        run: |
+          mkdir -p app/src/main/java/com/breakscroll/app
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+          
+      - name: Create build.gradle (root)
+        run: |
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.0' apply false
+          }
+          EOF
+          
+      - name: Create settings.gradle
+        run: |
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BreakScroll"
+          include ':app'
+          EOF
+          
+      - name: Create gradle.properties
+        run: |
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m
+          EOF
+          
+      - name: Create app/build.gradle
+        run: |
+          cat > app/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.breakscroll.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.breakscroll.app"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildFeatures {
+                  viewBinding true
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+              implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.3'
+          }
+          EOF
+          
+      - name: Create AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="BreakScroll"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.BreakScroll">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".ScrollMonitorService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
+              </application>
+          </manifest>
+          EOF
+          
+      - name: Create MainActivity.kt
+        run: |
+          cat > app/src/main/java/com/breakscroll/app/MainActivity.kt << 'EOF'
+          package com.breakscroll.app
+
+          import android.app.AppOpsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Bundle
+          import android.os.Process
+          import android.provider.Settings
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import com.breakscroll.app.databinding.ActivityMainBinding
+
+          class MainActivity : AppCompatActivity() {
+              private lateinit var binding: ActivityMainBinding
+              private var isMonitoring = false
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  binding = ActivityMainBinding.inflate(layoutInflater)
+                  setContentView(binding.root)
+
+                  binding.switchMonitor.setOnCheckedChangeListener { _, isChecked ->
+                      if (isChecked) startMonitoring() else stopMonitoring()
+                  }
+              }
+
+              private fun hasUsageStatsPermission(): Boolean {
+                  val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+                  val mode = appOps.unsafeCheckOpNoThrow(
+                      AppOpsManager.OPSTR_GET_USAGE_STATS,
+                      Process.myUid(), packageName
+                  )
+                  return mode == AppOpsManager.MODE_ALLOWED
+              }
+
+              private fun startMonitoring() {
+                  if (!hasUsageStatsPermission()) {
+                      binding.switchMonitor.isChecked = false
+                      startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                      Toast.makeText(this, "Enable Usage Access", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val intent = Intent(this, ScrollMonitorService::class.java).apply {
+                      action = "ACTION_START"
+                  }
+                  startForegroundService(intent)
+                  isMonitoring = true
+                  binding.tvStatus.text = "Monitoring Active"
+              }
+
+              private fun stopMonitoring() {
+                  val intent = Intent(this, ScrollMonitorService::class.java).apply {
+                      action = "ACTION_STOP"
+                  }
+                  startService(intent)
+                  isMonitoring = false
+                  binding.tvStatus.text = "Monitoring Stopped"
+              }
+          }
+          EOF
+          
+      - name: Create ScrollMonitorService.kt
+        run: |
+          cat > app/src/main/java/com/breakscroll/app/ScrollMonitorService.kt << 'EOF'
+          package com.breakscroll.app
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.app.usage.UsageEvents
+          import android.app.usage.UsageStatsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Build
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+
+          class ScrollMonitorService : Service() {
+              private lateinit var usageStatsManager: UsageStatsManager
+              private var lastPackageName: String? = null
+              private var startTime: Long = 0
+
+              companion object {
+                  const val ACTION_START = "ACTION_START"
+                  const val ACTION_STOP = "ACTION_STOP"
+                  const val CHANNEL_ID = "breakscroll_monitor"
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+                  createNotificationChannel()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      ACTION_START -> startMonitoring()
+                      ACTION_STOP -> stopSelf()
+                  }
+                  return START_STICKY
+              }
+
+              private fun startMonitoring() {
+                  val notification = createNotification()
+                  startForeground(1, notification)
+                  // Simplified monitoring - in real app would use timer
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          CHANNEL_ID,
+                          "Scroll Monitor",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      val manager = getSystemService(NotificationManager::class.java)
+                      manager.createNotificationChannel(channel)
+                  }
+              }
+
+              private fun createNotification(): Notification {
+                  val intent = Intent(this, MainActivity::class.java)
+                  val pendingIntent = PendingIntent.getActivity(
+                      this, 0, intent,
+                      PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle("BreakScroll")
+                      .setContentText("Monitoring your scroll habits...")
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .setContentIntent(pendingIntent)
+                      .setOngoing(true)
+                      .build()
+              }
+          }
+          EOF
+          
+      - name: Create activity_main.xml
+        run: |
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="24dp"
+              android:gravity="center">
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="BreakScroll"
+                  android:textSize="32sp"
+                  android:textStyle="bold"
+                  android:layout_marginBottom="16dp" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Stop doomscrolling"
+                  android:textSize="16sp"
+                  android:layout_marginBottom="32dp" />
+
+              <Switch
+                  android:id="@+id/switchMonitor"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Monitor Scroll"
+                  android:textSize="18sp" />
+
+              <TextView
+                  android:id="@+id/tvStatus"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Monitoring Stopped"
+                  android:layout_marginTop="16dp"
+                  android:textSize="14sp" />
+
+          </LinearLayout>
+          EOF
+          
+      - name: Create strings.xml
+        run: |
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <resources>
+              <string name="app_name">BreakScroll</string>
+          </resources>
+          EOF
+          
+      - name: Create colors.xml
+        run: |
+          cat > app/src/main/res/values/colors.xml << 'EOF'
+          <resources>
+              <color name="purple_500">#FF6200EE</color>
+              <color name="purple_700">#FF3700B3</color>
+              <color name="teal_200">#FF03DAC5</color>
+          </resources>
+          
+      - name: Create themes.xml
+        run: |
+          cat > app/src/main/res/values/themes.xml << 'EOF'
+          <resources>
+              <style name="Theme.BreakScroll" parent="Theme.Material3.DayNight.NoActionBar">
+                  <item name="colorPrimary">@color/purple_500</item>
+                  <item name="colorPrimaryVariant">@color/purple_700</item>
+                  <item name="colorOnPrimary">@android:color/white</item>
+              </style>
+          </resources>
+          EOF
+          
+      - name: Create gradle wrapper
+        run: |
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          
+      - name: Download gradle wrapper jar
+        run: |
+          curl -L -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar
+          
+      - name: Create gradlew
+        run: |
+          cat > gradlew << 'EOF'
+          #!/bin/sh
+          APP_HOME=$(cd "$(dirname "$0")" && pwd)
+          CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+          exec java -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
+          EOF
+          chmod +x gradlew
+          
+      - name: Build APK
+        run: ./gradlew assembleDebug
+        
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: breakscroll-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
